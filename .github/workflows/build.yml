@@ -1,0 +1,20 @@
+name: Build and test
+on:
+  push:
+  pull_request:
+
+jobs:
+  macos:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Test diagnostic core
+        run: swift test
+      - name: Build menu bar app
+        run: ./scripts/build-app.sh
+      - name: Package app
+        run: ditto -c -k --sequesterRsrc --keepParent '.build/dist/macOS WatchKit.app' macos-watchkit.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-watchkit
+          path: macos-watchkit.zip
