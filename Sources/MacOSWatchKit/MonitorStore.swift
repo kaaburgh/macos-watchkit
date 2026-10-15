@@ -15,7 +15,11 @@ final class MonitorStore: ObservableObject {
     private var timer: Timer?
 
     var latest: MonitorSnapshot? { history.first }
-    var health: DiagnosticHealth { latest?.health ?? .unknown }
+    /// A persisted snapshot must never be presented as current health after a long pause or relaunch.
+    var health: DiagnosticHealth {
+        guard let latest, Date().timeIntervalSince(latest.timestamp) < 300 else { return .unknown }
+        return latest.health
+    }
 
     var symbol: String {
         if isChecking && latest == nil { return "arrow.triangle.2.circlepath" }
@@ -27,6 +31,9 @@ final class MonitorStore: ObservableObject {
     }
 
     var statusText: String {
+        if let latest, Date().timeIntervalSince(latest.timestamp) >= 300 {
+            return "Last check is stale"
+        }
         switch health {
         case .normal: return "No recent alerts"
         case .warning: return "TCC watchdogs detected"
