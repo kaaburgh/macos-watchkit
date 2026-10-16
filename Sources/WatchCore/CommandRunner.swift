@@ -30,47 +30,85 @@ public protocol CommandRunning {
     func run(executable: String, arguments: [String], timeout: TimeInterval) -> CommandResult
 }
 
-/// Uses files rather than Pipe to avoid deadlocking when the child writes more than a pipe buffer.
-/// Bounded execution time and output size protect the menu bar app from runaway `log show`.
+/// Thread-safe bounded capture of subprocess stdout and stderr.
+private final class BoundedCapture {
+    private let lock = NSLock()
+    private let limit: Int
+    private var stdout = Data()
+    private var stderr = Data()
+    private var exceeded = false
+
+    init(limit: Int) { self.limit = max(0, limit) }
+
+    /// Returns true only once, so the caller terminates the process on first overflow.
+    func append(_ data: Data, stderr isError: Bool) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        let remaining = max(0, limit - stdout.count - stderr.count)
+        if remaining > 0 {
+            if isError { stderr.append(data.prefix(remaining)) }
+            else { stdout.append(data.prefix(remaining)) }
+        }
+        if data.count > remaining && !exceeded {
+            exceeded = true
+            return true
+        }
+        return false
+    }
+
+    func result() -> (String, String, Bool) {
+        lock.lock()
+        defer { lock.unlock() }
+        return (String(decoding: stdout, as: UTF8.self),
+                String(decoding: stderr, as: UTF8.self), exceeded)
+    }
+}
+
+/// Pipes are continuously drained into bounded memory. No unbounded temporary files.
 public struct BoundedCommandRunner: CommandRunning {
     public let maximumOutputBytes: Int
 
     public init(maximumOutputBytes: Int = 1_048_576) {
-        self.maximumOutputBytes = maximumOutputBytes
+        self.maximumOutputBytes = max(0, maximumOutputBytes)
     }
 
     public func run(executable: String, arguments: [String], timeout: TimeInterval) -> CommandResult {
-        let directory = FileManager.default.temporaryDirectory
-        let stdoutURL = directory.appendingPathComponent("macos-watchkit-\(UUID().uuidString).out")
-        let stderrURL = directory.appendingPathComponent("macos-watchkit-\(UUID().uuidString).err")
-        let fm = FileManager.default
-        guard fm.createFile(atPath: stdoutURL.path, contents: nil),
-              fm.createFile(atPath: stderrURL.path, contents: nil),
-              let stdoutFile = FileHandle(forWritingAtPath: stdoutURL.path),
-              let stderrFile = FileHandle(forWritingAtPath: stderrURL.path)
-        else {
-            try? fm.removeItem(at: stdoutURL)
-            try? fm.removeItem(at: stderrURL)
-            return CommandResult(stdout: "", exitCode: nil, error: "Unable to create temporary output files")
-        }
-        defer {
-            stdoutFile.closeFile()
-            stderrFile.closeFile()
-            try? fm.removeItem(at: stdoutURL)
-            try? fm.removeItem(at: stderrURL)
-        }
-
         let process = Process()
+        let outPipe = Pipe()
+        let errPipe = Pipe()
         process.executableURL = URL(fileURLWithPath: executable)
         process.arguments = arguments
-        process.standardOutput = stdoutFile
-        process.standardError = stderrFile
+        process.standardOutput = outPipe
+        process.standardError = errPipe
         process.standardInput = FileHandle.nullDevice
 
         do {
             try process.run()
         } catch {
-            return CommandResult(stdout: "", exitCode: nil, error: "Unable to launch \(executable): \(error.localizedDescription)")
+            return CommandResult(stdout: "", exitCode: nil,
+                                 error: "Unable to launch \(executable): \(error.localizedDescription)")
+        }
+        // Close parent's writing ends; the child retains its own descriptors.
+        outPipe.fileHandleForWriting.closeFile()
+        errPipe.fileHandleForWriting.closeFile()
+
+        let captured = BoundedCapture(limit: maximumOutputBytes)
+        let readers = DispatchGroup()
+        let handles: [(FileHandle, Bool)] = [
+            (outPipe.fileHandleForReading, false), (errPipe.fileHandleForReading, true)
+        ]
+        for (handle, isError) in handles {
+            readers.enter()
+            DispatchQueue.global(qos: .utility).async {
+                defer { readers.leave() }
+                while true {
+                    let chunk = handle.readData(ofLength: 16_384)
+                    if chunk.isEmpty { break }
+                    if captured.append(chunk, stderr: isError), process.isRunning {
+                        process.terminate()
+                    }
+                }
+            }
         }
 
         let finished = DispatchSemaphore(value: 0)
@@ -78,30 +116,23 @@ public struct BoundedCommandRunner: CommandRunning {
             process.waitUntilExit()
             finished.signal()
         }
-        let timedOut = finished.wait(timeout: .now() + timeout) == .timedOut
-        if timedOut && process.isRunning {
-            process.terminate()
+        let timedOut = finished.wait(timeout: .now() + max(0, timeout)) == .timedOut
+        if timedOut && process.isRunning { process.terminate() }
+        if timedOut {
             if finished.wait(timeout: .now() + 1) == .timedOut && process.isRunning {
                 _ = kill(process.processIdentifier, SIGKILL)
                 _ = finished.wait(timeout: .now() + 1)
             }
+        } else if process.isRunning {
+            _ = finished.wait(timeout: .now() + 1)
         }
-
-        stdoutFile.synchronizeFile()
-        stderrFile.synchronizeFile()
-        let (stdout, outTruncated) = readBounded(stdoutURL)
-        let (stderr, errTruncated) = readBounded(stderrURL)
+        let drained = readers.wait(timeout: .now() + 2) == .success
+        let (stdout, stderr, truncated) = captured.result()
         return CommandResult(
             stdout: stdout, stderr: stderr,
             exitCode: process.isRunning ? nil : process.terminationStatus,
-            timedOut: timedOut, truncated: outTruncated || errTruncated
+            timedOut: timedOut, truncated: truncated,
+            error: drained ? nil : "Unable to drain command output"
         )
-    }
-
-    private func readBounded(_ url: URL) -> (String, Bool) {
-        guard let file = FileHandle(forReadingAtPath: url.path) else { return ("", false) }
-        defer { file.closeFile() }
-        let bytes = file.readData(ofLength: maximumOutputBytes + 1)
-        return (String(decoding: bytes.prefix(maximumOutputBytes), as: UTF8.self), bytes.count > maximumOutputBytes)
     }
 }
