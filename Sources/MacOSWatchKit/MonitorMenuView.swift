@@ -62,8 +62,8 @@ struct MonitorMenuView: View {
                             .foregroundStyle(.secondary)
                         }
                         if let pids = result.countsByPID, !pids.isEmpty {
-                            Text("Affected PIDs").font(.caption.weight(.semibold))
-                            ForEach(pids.sorted(by: { $0.value > $1.value }), id: \.key) { entry in
+                            Text("Top affected PIDs").font(.caption.weight(.semibold))
+                            ForEach(Array(pids.sorted(by: { $0.value > $1.value }).prefix(8)), id: \.key) { entry in
                                 HStack {
                                     Text(entry.key)
                                     Spacer()
