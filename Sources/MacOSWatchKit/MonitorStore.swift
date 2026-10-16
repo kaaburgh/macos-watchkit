@@ -18,6 +18,7 @@ final class MonitorStore: ObservableObject {
     private var pollTimer: Timer?
     private var freshnessTimer: Timer?
     private var wakeObserver: NSObjectProtocol?
+    private var backgroundActivity: NSObjectProtocol?
     private var lastSuccessfulCoverage: Date?
     private var baselineStart: Date
     private let checkpointKey = "tcc.lastSuccessfulCoverage"
@@ -54,17 +55,22 @@ final class MonitorStore: ObservableObject {
     }
 
     private init(historyStore: HistoryStore = .defaultStore()) {
+        let loaded = historyStore.load()
         self.historyStore = historyStore
-        history = historyStore.load()
-        lastSuccessfulCoverage = (UserDefaults.standard.object(forKey: checkpointKey) as? Date)
-            ?? history.flatMap(\.diagnostics).first(where: { $0.id == "tcc-watchdog" && $0.coverageThrough != nil })?.coverageThrough
-        baselineStart = (UserDefaults.standard.object(forKey: baselineKey) as? Date)
+        self.history = loaded
+        self.baselineStart = (UserDefaults.standard.object(forKey: "tcc.baselineStart") as? Date)
             ?? Date().addingTimeInterval(-180)
+        self.lastSuccessfulCoverage = (UserDefaults.standard.object(forKey: "tcc.lastSuccessfulCoverage") as? Date)
+            ?? loaded.flatMap(\.diagnostics).first(where: { $0.id == "tcc-watchdog" && $0.coverageThrough != nil })?.coverageThrough
         UserDefaults.standard.set(baselineStart, forKey: baselineKey)
     }
 
     func start() {
         guard pollTimer == nil else { return }
+        // Background monitoring should not be throttled by App Nap. This does
+        // not prevent the Mac itself from going to sleep.
+        backgroundActivity = ProcessInfo.processInfo.beginActivity(
+            options: .background, reason: "Periodic local TCC watchdog monitoring")
         checkNow()
 
         let timer = Timer(timeInterval: Self.pollInterval, repeats: true) { [weak self] _ in
