@@ -1,5 +1,8 @@
 import Foundation
 import XCTest
+#if os(macOS)
+import AppKit
+#endif
 @testable import WatchCore
 
 private final class RecordedCall {
@@ -209,13 +212,27 @@ final class WatchCoreTests: XCTestCase {
 
     #if os(macOS)
     func testRealMacOSUnifiedLoggingPredicateSmoke() {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = .current
+        formatter.dateFormat = "yyyy-MM-dd HH:mm:ss"
+        let now = Date()
         let result = BoundedCommandRunner(maximumOutputBytes: 262_144).run(
             executable: "/usr/bin/log",
-            arguments: ["show", "--last", "30s", "--style", "compact", "--no-pager",
+            arguments: ["show", "--start", formatter.string(from: now.addingTimeInterval(-30)),
+                        "--end", formatter.string(from: now),
+                        "--style", "compact", "--no-pager",
                         "--predicate", "process == \"kernel\" AND eventMessage CONTAINS[c] \"watchdog expired for approval\""],
             timeout: 20)
         XCTAssertFalse(result.timedOut)
         XCTAssertEqual(result.exitCode, 0, result.stderr)
+    }
+
+    func testMenuBarStatusSymbolsAreValid() {
+        for symbol in ["checkmark.shield.fill", "exclamationmark.shield.fill",
+                       "questionmark.circle.fill", "arrow.triangle.2.circlepath"] {
+            XCTAssertNotNil(NSImage(systemSymbolName: symbol, accessibilityDescription: nil), symbol)
+        }
     }
     #endif
 
