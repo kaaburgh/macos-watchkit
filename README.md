@@ -9,7 +9,11 @@ A small, native **macOS menu bar system-health monitor**. The first diagnostic c
 - Gives a manual **Check now** action and a **Copy report** action.
 - Keeps the most recent 100 diagnostic snapshots locally in `~/Library/Application Support/macos-watchkit/history.json` (only counts, status, and timestamps; **not** raw system logs or accessed paths).
 - Does not require `sudo`, read private TCC databases, reset TCC permissions, or automatically touch protected `Desktop`, `Documents`, or `Downloads` folders.
-- Each log query times out after 20 seconds; failed, truncated, or timed-out queries show **unknown**, not a false green status.
+- Each log query times out after 20 seconds, with combined stdout/stderr limited to 1 MiB **during execution**, without temporary output files.
+- Failed, truncated, or timed-out queries show **unknown**, not a false green status.
+- The last successfully verified log-coverage timestamp is stored independently of the 100-entry history. Following errors or sleep, the next query backfills the missed interval.
+- If a gap exceeds the 24-hour catch-up limit, the status remains **unknown** until the user explicitly starts a new baseline, acknowledging the unverified interval.
+- Stores the first/last matching watchdog events and per-PID counts alongside per-service counts.
 
 ## Install and run (macOS 13+)
 
@@ -37,9 +41,9 @@ The incident motivating this tool produced messages like:
 kernel (Sandbox) watchdog expired for approval entry 3174168 (kTCCServiceSystemPolicyDownloadsFolder, pid 85402)
 ```
 
-The checker uses `/usr/bin/log show --last 3m` and a narrow kernel watchdog predicate. It intentionally **does not** scrape every TCC request, because the original incident produced enormous volumes of messages and logging was eventually quarantined. No polling of private files or protected paths is needed for passive detection.
+The checker uses `/usr/bin/log show --start <checkpoint>` and a narrow kernel watchdog predicate. Normally it starts 3 minutes ago; after a failed or delayed poll, it backfills from the last successful checkpoint. It intentionally **does not** scrape every TCC request, because the original incident produced enormous volumes of messages and logging was eventually quarantined. No polling of private files or protected paths is needed for passive detection.
 
-Only events still retained in Unified Logging can be detected. If the query fails or times out, status is unknown. The rolling lookback overlaps adjacent two-minute checks; counts are **per window**, not cumulative unique incidents. It is possible for events not to have been persisted or to be hidden by access policy.
+Only events still retained in Unified Logging can be detected. If the query fails or times out, status is unknown. The rolling lookback overlaps adjacent two-minute checks; counts are **per window**, not cumulative unique incidents. The overlapping window may count the same watchdog more than once across snapshots. It is possible for events not to have been persisted or to be hidden by access policy.
 
 To add another diagnostic, implement the `SystemDiagnostic` protocol in `Sources/WatchCore/` and register it in `MonitorStore.checkNow()`. Every result supports a named status, summary and optional per-category counts.
 
