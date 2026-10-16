@@ -61,6 +61,31 @@ struct MonitorMenuView: View {
                             .font(.caption2)
                             .foregroundStyle(.secondary)
                         }
+                        if let pids = result.countsByPID, !pids.isEmpty {
+                            Text("Affected PIDs").font(.caption.weight(.semibold))
+                            ForEach(pids.sorted(by: { $0.value > $1.value }), id: \.key) { entry in
+                                HStack {
+                                    Text(entry.key)
+                                    Spacer()
+                                    Text("\(entry.value)").monospacedDigit()
+                                }
+                                .font(.caption2).foregroundStyle(.secondary)
+                            }
+                        }
+                        if let first = result.firstEvent {
+                            Text("First: \(first.timestamp ?? "Unknown time") — PID \(first.processID.map(String.init) ?? "?")")
+                                .font(.caption2).foregroundStyle(.secondary)
+                        }
+                        if let last = result.lastEvent {
+                            Text("Last: \(last.timestamp ?? "Unknown time") — PID \(last.processID.map(String.init) ?? "?")")
+                                .font(.caption2).foregroundStyle(.secondary)
+                        }
+                        if result.requiresBaselineReset == true {
+                            Text("A monitoring gap cannot be backfilled. Starting a new baseline explicitly accepts this unverified interval.")
+                                .font(.caption).foregroundStyle(.orange)
+                            Button("Start new baseline") { monitor.checkNow(resetBaseline: true) }
+                                .disabled(monitor.isChecking)
+                        }
                     }
                 }
                 Text("Checked \(snapshot.timestamp.formatted(date: .abbreviated, time: .standard)) · every 2 min")
