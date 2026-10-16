@@ -11,15 +11,23 @@ fi
 
 swift build -c release --product MacOSWatchKit
 BIN_DIR="$(swift build -c release --show-bin-path)"
-DEST="$ROOT/.build/dist/macOS WatchKit.app"
-mkdir -p "$DEST/Contents/MacOS" "$DEST/Contents/Resources"
-cp "$BIN_DIR/MacOSWatchKit" "$DEST/Contents/MacOS/MacOSWatchKit"
-cp "$ROOT/Resources/Info.plist" "$DEST/Contents/Info.plist"
-
-# Locally compiled executable; ad-hoc signing requires no credentials.
-codesign --force --sign - --timestamp=none "$DEST"
+DIST="$ROOT/.build/dist"
+DEST="$DIST/macOS WatchKit.app"
+mkdir -p "$DIST"
+STAGING="$(mktemp -d "$DIST/.watchkit-stage.XXXXXX")"
+trap 'rm -rf "$STAGING"' EXIT
+NEW="$STAGING/macOS WatchKit.app"
+mkdir -p "$NEW/Contents/MacOS" "$NEW/Contents/Resources"
+# Sign a *new* inode instead of overwriting a binary possibly still executing.
+cp "$BIN_DIR/MacOSWatchKit" "$NEW/Contents/MacOS/MacOSWatchKit"
+cp "$ROOT/Resources/Info.plist" "$NEW/Contents/Info.plist"
+codesign --force --sign - --timestamp=none "$NEW"
+# Replace only after staging and signing succeeded; stale bundle contents are removed.
+rm -rf "$DEST"
+mv "$NEW" "$DEST"
 
 echo "Built: $DEST"
 if [[ "${1:-}" == "--open" ]]; then
+  echo "If an older instance is still running, quit it from the menu bar first."
   open "$DEST"
 fi

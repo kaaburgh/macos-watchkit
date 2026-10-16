@@ -7,22 +7,31 @@ import WatchCore
 final class MonitorStore: ObservableObject {
     static let shared = MonitorStore()
     static let pollInterval: TimeInterval = 120
+    static let freshnessLimit: TimeInterval = pollInterval * 2.5
 
     @Published private(set) var history: [MonitorSnapshot]
     @Published private(set) var isChecking = false
+    // Explicit published clock: SwiftUI must re-render when a snapshot becomes stale.
+    @Published private(set) var clock = Date()
 
     private let historyStore: HistoryStore
-    private var timer: Timer?
+    private var pollTimer: Timer?
+    private var freshnessTimer: Timer?
+    private var wakeObserver: NSObjectProtocol?
     private var lastSuccessfulCoverage: Date?
+    private var baselineStart: Date
     private let checkpointKey = "tcc.lastSuccessfulCoverage"
+    private let baselineKey = "tcc.baselineStart"
 
     var latest: MonitorSnapshot? { history.first }
-    var needsBaselineReset: Bool {
-        latest?.diagnostics.contains(where: { $0.requiresBaselineReset == true }) == true
+    var isStale: Bool {
+        guard let latest else { return true }
+        let age = clock.timeIntervalSince(latest.timestamp)
+        return age >= Self.freshnessLimit || age < -Self.freshnessLimit
     }
-    /// A persisted snapshot must never be presented as current health after a long pause or relaunch.
+
     var health: DiagnosticHealth {
-        guard let latest, Date().timeIntervalSince(latest.timestamp) < 300 else { return .unknown }
+        guard let latest, !isStale else { return .unknown }
         return latest.health
     }
 
@@ -31,14 +40,12 @@ final class MonitorStore: ObservableObject {
         switch health {
         case .normal: return "checkmark.shield.fill"
         case .warning: return "exclamationmark.shield.fill"
-        case .unknown: return "questionmark.shield.fill"
+        case .unknown: return "questionmark.circle.fill"
         }
     }
 
     var statusText: String {
-        if let latest, Date().timeIntervalSince(latest.timestamp) >= 300 {
-            return "Last check is stale"
-        }
+        if latest != nil && isStale { return "Last check is stale" }
         switch health {
         case .normal: return "No recent alerts"
         case .warning: return "TCC watchdogs detected"
@@ -48,42 +55,71 @@ final class MonitorStore: ObservableObject {
 
     private init(historyStore: HistoryStore = .defaultStore()) {
         self.historyStore = historyStore
-        self.history = historyStore.load()
-        self.lastSuccessfulCoverage = (UserDefaults.standard.object(forKey: checkpointKey) as? Date)
+        history = historyStore.load()
+        lastSuccessfulCoverage = (UserDefaults.standard.object(forKey: checkpointKey) as? Date)
             ?? history.flatMap(\.diagnostics).first(where: { $0.id == "tcc-watchdog" && $0.coverageThrough != nil })?.coverageThrough
+        baselineStart = (UserDefaults.standard.object(forKey: baselineKey) as? Date)
+            ?? Date().addingTimeInterval(-180)
+        UserDefaults.standard.set(baselineStart, forKey: baselineKey)
     }
 
     func start() {
-        guard timer == nil else { return }
+        guard pollTimer == nil else { return }
         checkNow()
-        timer = Timer.scheduledTimer(withTimeInterval: Self.pollInterval, repeats: true) { _ in
-            Task { @MainActor in MonitorStore.shared.checkNow() }
+
+        let timer = Timer(timeInterval: Self.pollInterval, repeats: true) { [weak self] _ in
+            DispatchQueue.main.async { [weak self] in self?.checkNow() }
+        }
+        timer.tolerance = 10
+        RunLoop.main.add(timer, forMode: .common)
+        pollTimer = timer
+
+        let clockTimer = Timer(timeInterval: 30, repeats: true) { [weak self] _ in
+            DispatchQueue.main.async { [weak self] in self?.clock = Date() }
+        }
+        clockTimer.tolerance = 5
+        RunLoop.main.add(clockTimer, forMode: .common)
+        freshnessTimer = clockTimer
+
+        wakeObserver = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didWakeNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            DispatchQueue.main.async { [weak self] in
+                self?.clock = Date()
+                self?.checkNow()
+            }
         }
     }
 
     func checkNow(resetBaseline: Bool = false) {
         guard !isChecking else { return }
+        clock = Date()
         isChecking = true
-        // Persisted independently of the 100-entry history, even after prolonged failures.
-        let previousCoverage: Date? = resetBaseline ? nil : lastSuccessfulCoverage
-        Task.detached(priority: .utility) {
-            // Add more independent SystemDiagnostic implementations here later.
+        if resetBaseline {
+            // The user explicitly accepts losing earlier unverified coverage.
+            baselineStart = Date().addingTimeInterval(-Double(TCCWatchdogDiagnostic().lookbackMinutes * 60))
+            UserDefaults.standard.set(baselineStart, forKey: baselineKey)
+            lastSuccessfulCoverage = nil
+            UserDefaults.standard.removeObject(forKey: checkpointKey)
+        }
+        let previousCoverage = lastSuccessfulCoverage ?? baselineStart
+        // Synchronous subprocess/semaphore waits must not block the Swift-concurrency pool.
+        DispatchQueue.global(qos: .utility).async { [weak self] in
             let result = TCCWatchdogDiagnostic().check(since: previousCoverage)
             let snapshot = MonitorSnapshot(timestamp: Date(), diagnostics: [result])
-            await MainActor.run {
-                MonitorStore.shared.finish(snapshot)
-            }
+            DispatchQueue.main.async { [weak self] in self?.finish(snapshot) }
         }
     }
 
     private func finish(_ snapshot: MonitorSnapshot) {
         isChecking = false
-        if let coveredThrough = snapshot.diagnostics.first(where: { $0.id == "tcc-watchdog" })?.coverageThrough {
-            lastSuccessfulCoverage = coveredThrough
-            UserDefaults.standard.set(coveredThrough, forKey: checkpointKey)
+        clock = Date()
+        if let covered = snapshot.diagnostics.first(where: { $0.id == "tcc-watchdog" })?.coverageThrough {
+            lastSuccessfulCoverage = covered
+            UserDefaults.standard.set(covered, forKey: checkpointKey)
         }
         history.insert(snapshot, at: 0)
-        history = Array(history.prefix(100))
+        history = Array(history.prefix(historyStore.limit))
         historyStore.save(history)
     }
 
@@ -101,12 +137,12 @@ final class MonitorStore: ObservableObject {
             }.joined(separator: " | ")
             return "\(ISO8601DateFormatter().string(from: snapshot.timestamp)) \(results)"
         }
-        let content = (["macOS WatchKit — last \(records.count) checks", "Polling: 120 seconds; adaptive TCC coverage with 24h backfill limit"] + records).joined(separator: "\n")
+        let interval = Int(Self.pollInterval)
+        let backfillHours = Int(TCCWatchdogDiagnostic().maximumCatchupInterval / 3600)
+        let content = (["macOS WatchKit — last \(records.count) checks",
+                        "Polling: \(interval) seconds; adaptive TCC backfill limit: \(backfillHours)h"] + records)
+            .joined(separator: "\n")
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(content, forType: .string)
-    }
-
-    func revealHistory() {
-        NSWorkspace.shared.activateFileViewerSelecting([historyStore.fileURL])
     }
 }

@@ -45,8 +45,12 @@ struct MonitorMenuView: View {
                         HStack {
                             Text(result.title).font(.subheadline.weight(.semibold))
                             Spacer()
-                            Image(systemName: result.health.symbol)
-                                .foregroundStyle(result.health.tint)
+                            Image(systemName: monitor.isStale ? DiagnosticHealth.unknown.symbol : result.health.symbol)
+                                .foregroundStyle(monitor.isStale ? DiagnosticHealth.unknown.tint : result.health.tint)
+                        }
+                        if monitor.isStale {
+                            Text("Historical result as of \(snapshot.timestamp.formatted(date: .abbreviated, time: .standard)); not current health")
+                                .font(.caption).foregroundStyle(.secondary)
                         }
                         Text(result.summary)
                             .font(.caption)
@@ -62,14 +66,15 @@ struct MonitorMenuView: View {
                             .foregroundStyle(.secondary)
                         }
                         if let pids = result.countsByPID, !pids.isEmpty {
-                            Text("Top affected PIDs").font(.caption.weight(.semibold))
-                            ForEach(Array(pids.sorted(by: { $0.value > $1.value }).prefix(8)), id: \.key) { entry in
+                            Text("Affected PIDs").font(.caption.weight(.semibold))
+                            ForEach(pids.sorted(by: { $0.value > $1.value }), id: \.key) { entry in
                                 HStack {
                                     Text(entry.key)
                                     Spacer()
                                     Text("\(entry.value)").monospacedDigit()
                                 }
-                                .font(.caption2).foregroundStyle(.secondary)
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
                             }
                         }
                         if let first = result.firstEvent {
@@ -88,7 +93,7 @@ struct MonitorMenuView: View {
                         }
                     }
                 }
-                Text("Checked \(snapshot.timestamp.formatted(date: .abbreviated, time: .standard)) · every 2 min")
+                Text("Checked \(snapshot.timestamp.formatted(date: .abbreviated, time: .standard)) · every \(Int(MonitorStore.pollInterval / 60)) min")
                     .font(.caption2)
                     .foregroundStyle(.secondary)
             } else {

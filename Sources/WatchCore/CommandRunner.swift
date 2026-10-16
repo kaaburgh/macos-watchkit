@@ -30,7 +30,8 @@ public protocol CommandRunning {
     func run(executable: String, arguments: [String], timeout: TimeInterval) -> CommandResult
 }
 
-/// Thread-safe bounded capture of subprocess stdout and stderr.
+/// Thread-safe, in-memory capture. The combined stdout/stderr budget is enforced as bytes arrive,
+/// not after a potentially noisy process finishes.
 private final class BoundedCapture {
     private let lock = NSLock()
     private let limit: Int
@@ -40,7 +41,7 @@ private final class BoundedCapture {
 
     init(limit: Int) { self.limit = max(0, limit) }
 
-    /// Returns true only once, so the caller terminates the process on first overflow.
+    /// Returns true only on the first overflow, so the caller can terminate the child.
     func append(_ data: Data, stderr isError: Bool) -> Bool {
         lock.lock()
         defer { lock.unlock() }
@@ -64,7 +65,8 @@ private final class BoundedCapture {
     }
 }
 
-/// Pipes are continuously drained into bounded memory. No unbounded temporary files.
+/// Runs commands off the UI thread. Pipes are continuously drained and their combined output
+/// is hard-limited in memory; no unbounded temporary files are created.
 public struct BoundedCommandRunner: CommandRunning {
     public let maximumOutputBytes: Int
 
@@ -88,7 +90,7 @@ public struct BoundedCommandRunner: CommandRunning {
             return CommandResult(stdout: "", exitCode: nil,
                                  error: "Unable to launch \(executable): \(error.localizedDescription)")
         }
-        // Close parent's writing ends; the child retains its own descriptors.
+        // Only the child retains the writing ends. Closing ours ensures EOF when it exits.
         outPipe.fileHandleForWriting.closeFile()
         errPipe.fileHandleForWriting.closeFile()
 
@@ -116,14 +118,16 @@ public struct BoundedCommandRunner: CommandRunning {
             process.waitUntilExit()
             finished.signal()
         }
+
         let timedOut = finished.wait(timeout: .now() + max(0, timeout)) == .timedOut
         if timedOut && process.isRunning { process.terminate() }
         if timedOut {
-            if finished.wait(timeout: .now() + 1) == .timedOut && process.isRunning {
-                _ = kill(process.processIdentifier, SIGKILL)
-                _ = finished.wait(timeout: .now() + 1)
-            }
+            // Do not signal a raw numeric PID: it can be recycled after the process
+            // exits and is reaped by waitUntilExit(). A bounded SIGTERM plus a
+            // bounded drain is sufficient for our read-only /usr/bin/log command.
+            _ = finished.wait(timeout: .now() + 1)
         } else if process.isRunning {
+            // Defensive: waitUntilExit normally guarantees that isRunning is false.
             _ = finished.wait(timeout: .now() + 1)
         }
         let drained = readers.wait(timeout: .now() + 2) == .success
