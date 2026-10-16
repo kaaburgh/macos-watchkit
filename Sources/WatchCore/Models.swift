@@ -14,11 +14,19 @@ public struct DiagnosticResult: Codable, Sendable, Equatable, Identifiable {
     public let eventCount: Int?
     public let countsByService: [String: Int]
     public let elapsedSeconds: Double
+    /// Optional fields allow loading history files written by v0.1.
+    public let countsByPID: [String: Int]?
+    public let firstEvent: TCCWatchdogEvent?
+    public let lastEvent: TCCWatchdogEvent?
+    public let coverageThrough: Date?
+    public let requiresBaselineReset: Bool?
 
     public init(
         id: String, title: String, health: DiagnosticHealth,
         summary: String, eventCount: Int?, countsByService: [String: Int],
-        elapsedSeconds: Double
+        elapsedSeconds: Double, countsByPID: [String: Int]? = nil,
+        firstEvent: TCCWatchdogEvent? = nil, lastEvent: TCCWatchdogEvent? = nil,
+        coverageThrough: Date? = nil, requiresBaselineReset: Bool? = nil
     ) {
         self.id = id
         self.title = title
@@ -27,6 +35,11 @@ public struct DiagnosticResult: Codable, Sendable, Equatable, Identifiable {
         self.eventCount = eventCount
         self.countsByService = countsByService
         self.elapsedSeconds = elapsedSeconds
+        self.countsByPID = countsByPID
+        self.firstEvent = firstEvent
+        self.lastEvent = lastEvent
+        self.coverageThrough = coverageThrough
+        self.requiresBaselineReset = requiresBaselineReset
     }
 }
 
