@@ -73,7 +73,36 @@ final class WatchCoreTests: XCTestCase {
             XCTAssertEqual(status.health, .unknown)
             XCTAssertNil(status.eventCount)
             XCTAssertNil(status.coverageThrough)
+            if !result.timedOut {
+                XCTAssertNil(status.requiresBaselineReset)
+            }
         }
+    }
+
+    func testNonSizeFailuresDoNotBisectOrOfferReset() {
+        for failure in [
+            CommandResult(stdout: "", exitCode: 1),
+            CommandResult(stdout: "", exitCode: nil, error: "missing binary")
+        ] {
+            let runner = SequencedRunner([failure])
+            let result = TCCWatchdogDiagnostic(runner: runner).check()
+            XCTAssertEqual(runner.calls.count, 1, "Non-size failures must not trigger retries")
+            XCTAssertEqual(result.health, .unknown)
+            XCTAssertNil(result.requiresBaselineReset)
+            XCTAssertNil(result.coverageThrough)
+            XCTAssertNil(result.eventCount)
+        }
+    }
+
+    func testSizeFailureAtMinimumChunkRequiresReset() {
+        let runner = SequencedRunner([CommandResult(stdout: "", truncated: true)])
+        let result = TCCWatchdogDiagnostic(
+            runner: runner, chunkDuration: 30, minimumChunkDuration: 30
+        ).check()
+        XCTAssertEqual(runner.calls.count, 1)
+        XCTAssertEqual(result.health, .unknown)
+        XCTAssertEqual(result.requiresBaselineReset, true)
+        XCTAssertNil(result.coverageThrough)
     }
 
     func testTruncatedCapturedWatchdogIsWarningWithoutCoverage() {

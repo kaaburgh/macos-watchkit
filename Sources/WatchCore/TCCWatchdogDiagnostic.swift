@@ -114,6 +114,7 @@ public struct TCCWatchdogDiagnostic: SystemDiagnostic {
         var seen = Set<String>()
         var events: [TCCWatchdogEvent] = []
         var failure: String?
+        var minimumSizeFailure = false
 
         while cursor < end && attempts < maximumChunkAttempts && successes < maximumSuccessfulChunks {
             attempts += 1
@@ -142,7 +143,14 @@ public struct TCCWatchdogDiagnostic: SystemDiagnostic {
                 else if result.truncated { failure = "Log output exceeded the safety limit" }
                 else if let error = result.error { failure = error }
                 else { failure = "Log query failed (exit \(result.exitCode.map(String.init) ?? "unknown"))" }
-                if chunkEnd.timeIntervalSince(cursor) <= minimumChunkDuration { break }
+                // Only window-size failures can benefit from bisection. A nonzero
+                // exit or launch error is not fixed by querying a shorter interval;
+                // keep the gap unknown without offering a misleading baseline reset.
+                guard result.timedOut || result.truncated else { break }
+                if chunkEnd.timeIntervalSince(cursor) <= minimumChunkDuration {
+                    minimumSizeFailure = true
+                    break
+                }
                 chunkSeconds = max(minimumChunkDuration, floor(chunkEnd.timeIntervalSince(cursor) / 2))
             }
         }
@@ -163,7 +171,7 @@ public struct TCCWatchdogDiagnostic: SystemDiagnostic {
         } else {
             summary = "\(reason); unverified gap after \(formatter.string(from: cursor))"
         }
-        let requiresReset = !complete && chunkSeconds <= minimumChunkDuration && failure != nil
+        let requiresReset = !complete && minimumSizeFailure
         return DiagnosticResult(
             id: id, title: title, health: count > 0 ? .warning : (complete ? .normal : .unknown),
             summary: summary, eventCount: complete || count > 0 ? count : nil,

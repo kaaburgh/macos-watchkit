@@ -21,8 +21,8 @@ final class MonitorStore: ObservableObject {
     private var backgroundActivity: NSObjectProtocol?
     private var lastSuccessfulCoverage: Date?
     private var baselineStart: Date
-    private let checkpointKey = "tcc.lastSuccessfulCoverage"
-    private let baselineKey = "tcc.baselineStart"
+    private static let checkpointKey = "tcc.lastSuccessfulCoverage"
+    private static let baselineKey = "tcc.baselineStart"
 
     var latest: MonitorSnapshot? { history.first }
     var isStale: Bool {
@@ -58,11 +58,11 @@ final class MonitorStore: ObservableObject {
         let loaded = historyStore.load()
         self.historyStore = historyStore
         self.history = loaded
-        self.baselineStart = (UserDefaults.standard.object(forKey: "tcc.baselineStart") as? Date)
+        self.baselineStart = (UserDefaults.standard.object(forKey: Self.baselineKey) as? Date)
             ?? Date().addingTimeInterval(-180)
-        self.lastSuccessfulCoverage = (UserDefaults.standard.object(forKey: "tcc.lastSuccessfulCoverage") as? Date)
+        self.lastSuccessfulCoverage = (UserDefaults.standard.object(forKey: Self.checkpointKey) as? Date)
             ?? loaded.flatMap(\.diagnostics).first(where: { $0.id == "tcc-watchdog" && $0.coverageThrough != nil })?.coverageThrough
-        UserDefaults.standard.set(baselineStart, forKey: baselineKey)
+        UserDefaults.standard.set(baselineStart, forKey: Self.baselineKey)
     }
 
     func start() {
@@ -104,9 +104,9 @@ final class MonitorStore: ObservableObject {
         if resetBaseline {
             // The user explicitly accepts losing earlier unverified coverage.
             baselineStart = Date().addingTimeInterval(-Double(TCCWatchdogDiagnostic().lookbackMinutes * 60))
-            UserDefaults.standard.set(baselineStart, forKey: baselineKey)
+            UserDefaults.standard.set(baselineStart, forKey: Self.baselineKey)
             lastSuccessfulCoverage = nil
-            UserDefaults.standard.removeObject(forKey: checkpointKey)
+            UserDefaults.standard.removeObject(forKey: Self.checkpointKey)
         }
         let previousCoverage = lastSuccessfulCoverage ?? baselineStart
         // Synchronous subprocess/semaphore waits must not block the Swift-concurrency pool.
@@ -122,7 +122,7 @@ final class MonitorStore: ObservableObject {
         clock = Date()
         if let covered = snapshot.diagnostics.first(where: { $0.id == "tcc-watchdog" })?.coverageThrough {
             lastSuccessfulCoverage = covered
-            UserDefaults.standard.set(covered, forKey: checkpointKey)
+            UserDefaults.standard.set(covered, forKey: Self.checkpointKey)
         }
         history.insert(snapshot, at: 0)
         history = Array(history.prefix(historyStore.limit))
