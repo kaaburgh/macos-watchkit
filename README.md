@@ -5,7 +5,7 @@ A small, native **macOS menu bar system-health monitor**. The first diagnostic c
 ## What it does today
 
 - Checks every **2 minutes** for TCC/Sandbox watchdogs using a persisted coverage checkpoint, starting from an initial 3-minute baseline.
-- After sleep, errors or offline time, scans bounded 10-minute intervals (`--start`/`--end`), subdivides slow or noisy intervals, and advances coverage after each successful interval. Maximum historical catch-up age is 24 hours; unverified gaps never show green.
+- After sleep, errors or offline time, scans bounded 10-minute intervals (`--start`/`--end`), subdivides slow or noisy intervals, and advances coverage after each successful interval. The historical catch-up limit is 24 hours. If the older gap is too large to verify, the app **still scans the latest 3 minutes** and warns on any recent watchdogs, while keeping the historical gap unknown until an explicit new baseline.
 - Summarizes first and last event, service counts, and top affected PIDs. A truncated query with confirmed watchdogs produces a warning even when historical coverage is incomplete.
 - Shows a menu bar shield: checkmark (no events observed), warning (events found), question mark (check unavailable). **No events observed is not a guarantee the TCC system is healthy.**
 - Gives a manual **Check now** action and a **Copy report** action.
@@ -40,7 +40,7 @@ The incident motivating this tool produced messages like:
 kernel (Sandbox) watchdog expired for approval entry 3174168 (kTCCServiceSystemPolicyDownloadsFolder, pid 85402)
 ```
 
-The checker uses `/usr/bin/log show --start … --end …` with a narrow kernel watchdog predicate. It intentionally **does not** scrape every TCC request, because the original incident produced enormous volumes of messages and logging was eventually quarantined. No polling of private files or protected paths is needed for passive detection.
+The checker uses `/usr/bin/log show --start … --end …` with a narrow kernel watchdog predicate. Explicit UTC offsets in query timestamps avoid ambiguous intervals when daylight-saving clocks move backward. It intentionally **does not** scrape every TCC request, because the original incident produced enormous volumes of messages and logging was eventually quarantined. No polling of private files or protected paths is needed for passive detection.
 
 Only events still retained in Unified Logging can be detected. If a query fails or times out, already-proven watchdogs remain warnings; otherwise status is unknown until coverage can be established. Historical queries proceed in bounded chunks (retries split difficult chunks), preserving the successful checkpoint across launches. Counts are **per check**, not cumulative unique incidents, and duplicate approval-entry IDs are removed within a multi-chunk check. It is possible for events not to have been persisted or to be hidden by access policy.
 
