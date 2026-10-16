@@ -132,10 +132,7 @@ final class WatchCoreTests: XCTestCase {
         XCTAssertEqual(recovered.health, .warning)
         XCTAssertEqual(recovered.coverageThrough, origin.addingTimeInterval(240))
         let from = recorder.arguments.firstIndex(of: "--start")!
-        let formatter = DateFormatter()
-        formatter.locale = Locale(identifier: "en_US_POSIX")
-        formatter.timeZone = .current
-        formatter.dateFormat = "yyyy-MM-dd HH:mm:ss"
+        let formatter = TCCLogDateFormatter.make()
         XCTAssertEqual(recorder.arguments[from + 1], formatter.string(from: origin.addingTimeInterval(-2)))
         XCTAssertFalse(recorder.arguments.contains("--last"))
     }
@@ -149,6 +146,64 @@ final class WatchCoreTests: XCTestCase {
         XCTAssertEqual(result.health, .unknown)
         XCTAssertEqual(result.requiresBaselineReset, true)
         XCTAssertNil(result.coverageThrough)
+    }
+
+    func testOldGapStillScansRecentEventsAndNeverAdvancesHistoricalCheckpoint() {
+        let origin = Date(timeIntervalSince1970: 1_797_000_000)
+        let now = origin.addingTimeInterval(172_800) // Laptop was closed for two days.
+        let recorder = RecordedCall()
+        let result = TCCWatchdogDiagnostic(
+            runner: FakeRunner(result: CommandResult(stdout: example), recorder: recorder),
+            maximumCatchupInterval: 3600
+        ).check(since: origin, at: now)
+
+        XCTAssertEqual(result.health, .warning)
+        XCTAssertEqual(result.eventCount, 2)
+        XCTAssertEqual(result.requiresBaselineReset, true)
+        XCTAssertNil(result.coverageThrough)
+        XCTAssertTrue(result.summary.contains("older monitoring gap unverified"))
+
+        let formatter = TCCLogDateFormatter.make()
+        let startIndex = recorder.arguments.firstIndex(of: "--start")!
+        let endIndex = recorder.arguments.firstIndex(of: "--end")!
+        XCTAssertEqual(recorder.arguments[startIndex + 1],
+                       formatter.string(from: now.addingTimeInterval(-180)))
+        XCTAssertEqual(recorder.arguments[endIndex + 1], formatter.string(from: now))
+    }
+
+    func testOldGapWithoutRecentEventsRemainsUnknown() {
+        let origin = Date(timeIntervalSince1970: 1_797_000_000)
+        let recorder = RecordedCall()
+        let result = TCCWatchdogDiagnostic(
+            runner: FakeRunner(result: CommandResult(stdout: ""), recorder: recorder),
+            maximumCatchupInterval: 3600
+        ).check(since: origin, at: origin.addingTimeInterval(172_800))
+        XCTAssertEqual(result.health, .unknown)
+        XCTAssertEqual(result.eventCount, 0)
+        XCTAssertEqual(result.requiresBaselineReset, true)
+        XCTAssertNil(result.coverageThrough)
+        XCTAssertTrue(recorder.arguments.contains("--end"), "The recent window must still be checked")
+    }
+
+    func testOldGapWithRecentQueryFailureRemainsUnknown() {
+        let origin = Date(timeIntervalSince1970: 1_797_000_000)
+        let runner = SequencedRunner([CommandResult(stdout: "", exitCode: 1)])
+        let result = TCCWatchdogDiagnostic(
+            runner: runner, maximumCatchupInterval: 3600
+        ).check(since: origin, at: origin.addingTimeInterval(172_800))
+        XCTAssertEqual(runner.calls.count, 1)
+        XCTAssertEqual(result.health, .unknown)
+        XCTAssertEqual(result.requiresBaselineReset, true)
+        XCTAssertNil(result.coverageThrough)
+    }
+
+    func testLogDateFormatterDistinguishesRepeatedDSTHour() {
+        let formatter = TCCLogDateFormatter.make(timeZone: TimeZone(identifier: "Europe/Berlin")!)
+        let iso = ISO8601DateFormatter()
+        let first = iso.date(from: "2026-10-25T00:30:00Z")!
+        let second = iso.date(from: "2026-10-25T01:30:00Z")!
+        XCTAssertEqual(formatter.string(from: first), "2026-10-25 02:30:00+02:00")
+        XCTAssertEqual(formatter.string(from: second), "2026-10-25 02:30:00+01:00")
     }
 
     func testResetBaselineOnlyCoversRecentWindow() {
@@ -241,10 +296,7 @@ final class WatchCoreTests: XCTestCase {
 
     #if os(macOS)
     func testRealMacOSUnifiedLoggingPredicateSmoke() {
-        let formatter = DateFormatter()
-        formatter.locale = Locale(identifier: "en_US_POSIX")
-        formatter.timeZone = .current
-        formatter.dateFormat = "yyyy-MM-dd HH:mm:ss"
+        let formatter = TCCLogDateFormatter.make()
         let now = Date()
         let result = BoundedCommandRunner(maximumOutputBytes: 262_144).run(
             executable: "/usr/bin/log",
