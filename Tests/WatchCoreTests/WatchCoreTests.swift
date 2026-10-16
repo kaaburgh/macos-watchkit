@@ -204,6 +204,10 @@ final class WatchCoreTests: XCTestCase {
         let second = iso.date(from: "2026-10-25T01:30:00Z")!
         XCTAssertEqual(formatter.string(from: first), "2026-10-25 02:30:00+02:00")
         XCTAssertEqual(formatter.string(from: second), "2026-10-25 02:30:00+01:00")
+
+        // The real macOS log tool rejects bare 'Z' but accepts +00:00.
+        let utcFormatter = TCCLogDateFormatter.make(timeZone: TimeZone(secondsFromGMT: 0)!)
+        XCTAssertEqual(utcFormatter.string(from: first), "2026-10-25 00:30:00+00:00")
     }
 
     func testResetBaselineOnlyCoversRecentWindow() {
