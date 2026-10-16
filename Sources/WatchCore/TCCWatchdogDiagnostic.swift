@@ -49,6 +49,17 @@ public enum TCCWatchdogParser {
     }
 }
 
+/// Formats absolute instants for log(1), including the offset during repeated DST hours.
+enum TCCLogDateFormatter {
+    static func make(timeZone: TimeZone = .current) -> DateFormatter {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = timeZone
+        formatter.dateFormat = "yyyy-MM-dd HH:mm:ssXXXXX"
+        return formatter
+    }
+}
+
 /// Passive log-only diagnostic. Processes bounded, explicitly-ended intervals. Successfully
 /// checked intervals advance a persisted checkpoint even when later chunks fail; unread gaps
 /// are never reported healthy. A failing chunk is subdivided to make progress through storms.
@@ -90,20 +101,13 @@ public struct TCCWatchdogDiagnostic: SystemDiagnostic {
         let started = Date()
         let end = Date(timeIntervalSince1970: floor(now.timeIntervalSince1970))
         let recentStart = end.addingTimeInterval(-Double(lookbackMinutes * 60))
-        let start = min(recentStart, previousCoverage.map { $0.addingTimeInterval(-2) } ?? recentStart)
-        guard end.timeIntervalSince(start) <= maximumCatchupInterval else {
-            return DiagnosticResult(
-                id: id, title: title, health: .unknown,
-                summary: "Unverified monitoring gap exceeds backfill limit; start a new baseline",
-                eventCount: nil, countsByService: [:], elapsedSeconds: Date().timeIntervalSince(started),
-                requiresBaselineReset: true
-            )
-        }
+        let historicalStart = min(recentStart, previousCoverage.map { $0.addingTimeInterval(-2) } ?? recentStart)
+        // Large offline gaps remain unverified, but must not prevent detection
+        // of a *current* TCC watchdog storm.
+        let historicalGapUnverified = end.timeIntervalSince(historicalStart) > maximumCatchupInterval
+        let start = historicalGapUnverified ? recentStart : historicalStart
 
-        let formatter = DateFormatter()
-        formatter.locale = Locale(identifier: "en_US_POSIX")
-        formatter.timeZone = .current
-        formatter.dateFormat = "yyyy-MM-dd HH:mm:ss"
+        let formatter = TCCLogDateFormatter.make()
         let predicate = "process == \"kernel\" AND eventMessage CONTAINS[c] \"watchdog expired for approval\""
 
         var cursor = start
@@ -165,19 +169,26 @@ public struct TCCWatchdogDiagnostic: SystemDiagnostic {
         let summary: String
         if count > 0 {
             summary = "At least \(count) TCC watchdog event\(count == 1 ? "" : "s")" +
-                (complete ? "" : " (partial coverage: \(reason))")
+                (historicalGapUnverified ? " (recent window; older monitoring gap unverified)" :
+                    (complete ? "" : " (partial coverage: \(reason))"))
+        } else if historicalGapUnverified {
+            summary = complete
+                ? "No recent watchdog events observed; older monitoring gap unverified (start a new baseline)"
+                : "\(reason); recent window incomplete and older monitoring gap unverified"
         } else if complete {
             summary = "No watchdog events observed since \(formatter.string(from: start))"
         } else {
             summary = "\(reason); unverified gap after \(formatter.string(from: cursor))"
         }
-        let requiresReset = !complete && minimumSizeFailure
+        let requiresReset = historicalGapUnverified || (!complete && minimumSizeFailure)
         return DiagnosticResult(
-            id: id, title: title, health: count > 0 ? .warning : (complete ? .normal : .unknown),
+            id: id, title: title,
+            health: count > 0 ? .warning : (complete && !historicalGapUnverified ? .normal : .unknown),
             summary: summary, eventCount: complete || count > 0 ? count : nil,
             countsByService: services, elapsedSeconds: elapsed,
             countsByPID: pids, firstEvent: sorted.first, lastEvent: sorted.last,
-            coverageThrough: coveredThrough,
+            // A recent successful query cannot certify an older skipped interval.
+            coverageThrough: historicalGapUnverified ? nil : coveredThrough,
             requiresBaselineReset: requiresReset ? true : nil
         )
     }
