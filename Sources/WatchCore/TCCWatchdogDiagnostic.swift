@@ -55,7 +55,8 @@ enum TCCLogDateFormatter {
         let formatter = DateFormatter()
         formatter.locale = Locale(identifier: "en_US_POSIX")
         formatter.timeZone = timeZone
-        formatter.dateFormat = "yyyy-MM-dd HH:mm:ssXXXXX"
+        // Lowercase xxx renders +00:00 rather than Z in UTC; log(1) rejects bare Z.
+        formatter.dateFormat = "yyyy-MM-dd HH:mm:ssxxx"
         return formatter
     }
 }
